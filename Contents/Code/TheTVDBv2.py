@@ -27,15 +27,26 @@ TVDB_ACTORS_URL            = TVDB_SERIES_URL + '/actors'
 TVDB_SERIES_IMG_INFO_URL   = TVDB_SERIES_URL + '/images'
 TVDB_SERIES_IMG_QUERY_URL  = TVDB_SERIES_URL + '/images/query?keyType={type}'
 
-TVDB_SEARCH_URL            = TVDB_BASE_URL + '/search/series?name=%s'
-TVDB_SERIE_SEARCH          = 'https://thetvdb.com/api/GetSeries.php?seriesname='
+### TVDB API v4 ###
+TVDB_V4_BASE_URL           = 'https://api4.thetvdb.com/v4'
+TVDB_V4_LOGIN_URL          = TVDB_V4_BASE_URL + '/login'
+TVDB_V4_SEARCH_URL         = TVDB_V4_BASE_URL + '/search?query=%s&type=series'
+
+ISO639_2 = {
+  'en': 'eng', 'ru': 'rus', 'ja': 'jpn', 'de': 'ger', 'fr': 'fre', 'es': 'spa',
+  'it': 'ita', 'zh': 'zho', 'ko': 'kor', 'pt': 'por', 'nl': 'dut', 'pl': 'pol',
+  'hu': 'hun', 'cs': 'ces', 'tr': 'tur', 'uk': 'ukr', 'ar': 'ara', 'he': 'heb',
+  'sv': 'swe', 'da': 'dan', 'fi': 'fin', 'no': 'nor', 'el': 'gre', 'hr': 'hrv', 'sl': 'slv'
+}
 
 #THETVDB_LANGUAGES_CODE     = { 'cs': '28', 'da': '10', 'de': '14', 'el': '20', 'en':  '7', 'es': '16', 'fi': '11', 'fr': '17', 'he': '24', 
 #                               'hr': '31', 'hu': '19', 'it': '15', 'ja': '25', 'ko': '32', 'nl': '13', 'no':  '9', 'pl': '18', 'pt': '26',
 #                               'ru': '22', 'sv':  '8', 'tr': '21', 'zh': '27', 'sl': '30'}
-TVDB_HEADERS   = {}
-TVDB_AUTH_TIME = None
-netLocked      = {}
+TVDB_HEADERS               = {}
+TVDB_AUTH_TIME             = None
+TVDB_V4_HEADERS            = {}
+TVDB_V4_AUTH_TIME          = None
+netLocked                  = {}
 
 ### Functions ###  
 def LoadFileTVDB(id="", filename="", url="", headers={}):
@@ -353,26 +364,54 @@ def GetMetadata(media, movie, error_log, lang, metadata_source, AniDBid, TVDBid,
   Log.Info("TheTVDB_dict: {}".format(DictString(TheTVDB_dict, 4)))
   return TheTVDB_dict, IMDbid
   
+def EnsureTVDB4Token():
+  """ Obtain/refresh Bearer token for TVDB API v4
+  """
+  global TVDB_V4_HEADERS, TVDB_V4_AUTH_TIME
+  v4_key = Prefs['Tvdb4ApiKey']
+  if not v4_key or v4_key in ('None', 'N/A'):  Log.Root("TheTVDBv2.EnsureTVDB4Token() - No api key found: Prefs['Tvdb4ApiKey']");  return
+  if 'Authorization' not in TVDB_V4_HEADERS or (TVDB_V4_AUTH_TIME and (time.time()-TVDB_V4_AUTH_TIME) > CACHE_1DAY/2):
+    try:
+      TVDB_V4_HEADERS['Authorization'] = 'Bearer ' + JSON.ObjectFromString(HTTP.Request(TVDB_V4_LOGIN_URL, data=JSON.StringFromObject({'apikey': v4_key}), headers=common.COMMON_HEADERS, cacheTime=0).content)['data']['token']
+      TVDB_V4_AUTH_TIME = time.time()
+    except Exception as e:  Log.Root('TheTVDBv2.EnsureTVDB4Token() - Authorization Error: {}'.format(e))
+    else:                   Log.Root('TheTVDBv2.EnsureTVDB4Token() - URL {}'.format(TVDB_V4_LOGIN_URL))
+
 def Search(results,  media, lang, manual, movie):  #if maxi<50:  maxi = tvdb.Search_TVDB(results, media, lang, manual, movie)
   '''search for TVDB id series
   '''
   Log.Info("=== TheTVDB.Search() ===".ljust(157, '='))
-  #series_data = JSON.ObjectFromString(GetResultFromNetwork(TVDB_SEARCH_URL % mediaShowYear, additionalHeaders={'Accept-Language': lang}))['data'][0]
   orig_title = ( media.title if movie else media.show )
-  maxi = 0
+  maxi       = 0
+  EnsureTVDB4Token()
+
+  year_str = str(media.year) if getattr(media, 'year', None) and str(media.year).isdigit() and len(str(media.year)) == 4 else ''
+  lang_3   = lang if len(lang or '') == 3 else ISO639_2.get(lang, '')
+
+  def fetch_search(query_title, query_year='', query_lang=''):
+    url   = TVDB_V4_SEARCH_URL % quote(query_title) + ('&year=' + quote(query_year) if query_year else '') + ('&language=' + quote(query_lang) if query_lang else '')
+    fname = 'v4_search_{}{}{}.json'.format(quote(query_title), '_' + query_year if query_year else '', '_' + query_lang if query_lang else '')
+    return Dict(common.LoadFile(filename=fname, relativeDirectory=os.path.join("TheTVDB", "json"), url=url, headers=TVDB_V4_HEADERS), 'data', default=[])
+
+  series_list = []
   try:
-    TVDBsearchXml = XML.ElementFromURL( TVDB_SERIE_SEARCH + quote(orig_title), headers=common.COMMON_HEADERS, cacheTime=CACHE_1HOUR * 24)
-    if not TVDBsearchXml.xpath('Series'):
-      # Do a second try with the year removed from the title, if any
-      orig_title = re.sub(r'\s*\(\d{4}\)$', '', orig_title)
-      TVDBsearchXml = XML.ElementFromURL( TVDB_SERIE_SEARCH + quote(orig_title), headers=common.COMMON_HEADERS, cacheTime=CACHE_1HOUR * 24) 
-  except Exception as e:  Log.Error("TVDB Loading search XML failed, Exception: '%s'" % e)
-  else:
-    for serie in TVDBsearchXml.xpath('Series'):
-      a, b = orig_title, GetXml(serie, 'SeriesName').encode('utf-8') #a, b  = cleansedTitle, cleanse_title (serie.xpath('SeriesName')[0].text)
-      if b=='** 403: Series Not Permitted **': continue
-      score = 100 - 100*Util.LevenshteinDistance(a,b) / max(len(a),len(b)) if a!=b else 100
-      if maxi<score:  maxi = score
-      Log.Info("TVDB  - score: '%3d', id: '%6s', title: '%s'" % (score, GetXml(serie, 'seriesid'), GetXml(serie, 'SeriesName')))
-      results.Append(MetadataSearchResult(id="%s-%s" % ("tvdb", GetXml(serie, 'seriesid')), name="%s [%s-%s]" % (GetXml(serie, 'SeriesName'), "tvdb", GetXml(serie, 'seriesid')), year=None, lang=lang, score=score) )
+    series_list = fetch_search(orig_title, year_str, lang_3)
+    if not series_list and lang_3:    series_list = fetch_search(orig_title, year_str)
+    if not series_list and year_str:  series_list = fetch_search(orig_title)
+    if not series_list and re.search(r'\s*\(\d{4}\)$', orig_title):
+      clean_title = re.sub(r'\s*\(\d{4}\)$', '', orig_title)
+      series_list = fetch_search(clean_title, year_str) or fetch_search(clean_title)
+  except Exception as e:  Log.Error("TVDB Loading search JSON failed, Exception: '%s'" % e);  series_list = []
+
+  for serie in series_list:
+    series_id   = str(Dict(serie, 'tvdb_id') or '')
+    series_year = Dict(serie, 'year') or None
+    series_name = Dict(serie, 'translations', lang_3) or Dict(serie, 'name') or ''
+    if not series_id or not series_name:  continue
+
+    titles_to_check = set(filter(None, [Dict(serie, 'translations', lang_3), Dict(serie, 'name')] + (Dict(serie, 'aliases') or [])))
+    score = max([100 - 100*Util.LevenshteinDistance(orig_title, t.encode('utf-8') if isinstance(t, unicode) else t) / max(len(orig_title), len(t)) if orig_title!=t else 100 for t in titles_to_check] or [0])
+    if maxi<score:  maxi = score
+    Log.Info("TVDB  - score: '%3d', id: '%6s', title: '%s'" % (score, series_id, series_name))
+    results.Append(MetadataSearchResult(id="%s-%s" % ("tvdb", series_id), name="%s [%s-%s]" % (series_name, "tvdb", series_id), year=series_year, lang=lang, score=score) )
   return maxi
